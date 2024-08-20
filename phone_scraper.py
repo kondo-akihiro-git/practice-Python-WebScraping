@@ -15,11 +15,12 @@ scope = ["https://spreadsheets.google.com/feeds", 'https://www.googleapis.com/au
 creds = ServiceAccountCredentials.from_json_keyfile_name('credentials.json', scope)
 client = gspread.authorize(creds)
 
-# スプレッドシートのURLまたはシートIDを指定
-sheet = client.open_by_url("").sheet1
+# 新しいシートを作成
+spreadsheet = client.open_by_url("")
+new_sheet = spreadsheet.add_worksheet(title="Extracted Data", rows="100", cols="10")
 
 # スプレッドシートからURLリストを取得
-url_list = sheet.col_values(1)  # 1列目からURLを取得
+url_list = spreadsheet.sheet1.col_values(1)  # 1列目からURLを取得
 
 # 電話番号を探す関数
 def find_phone_numbers(url):
@@ -33,23 +34,15 @@ def find_phone_numbers(url):
             return hankaku
 
         phone_pattern = re.compile(r'\(?\d{2,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,4}', re.UNICODE)
-        postal_code_pattern = re.compile(r'\b\d{3}-\d{4}\b', re.UNICODE)  # 郵便番号の正規表現
-
         text = zenkaku_to_hankaku(soup.get_text())
         phones = set(phone_pattern.findall(text))
-        postal_codes = set(postal_code_pattern.findall(text))  # 郵便番号を抽出
-
-        print(f"Found phones: {phones}")  # デバッグ用出力
 
         filtered_phones = []
         for phone in phones:
-            # 電話番号と郵便番号の区別をする
-            digits = re.sub(r'\D', '', phone)
-            if len(digits) >= 10:  # 電話番号の最小桁数を設定（例: 日本の電話番号は通常10桁以上）
-                if not re.search(r'\d{3}-\d{4}', phone) or phone not in postal_codes:
+            if "fax" not in phone.lower():  # FAXではない電話番号をフィルタリング
+                digits = re.sub(r'\D', '', phone)
+                if len(digits) >= 10:  # 電話番号の最小桁数を設定（例: 日本の電話番号は通常10桁以上）
                     filtered_phones.append(phone)
-        
-        print(f"Filtered phones: {filtered_phones}")  # デバッグ用出力
 
         return filtered_phones
     except Exception as e:
@@ -82,15 +75,35 @@ def find_contact_form_links(url):
         links = soup.find_all('a', href=True)
         for link in links:
             href = link['href']
-            link_text = link.get_text(strip=True).lower()
             full_url = urljoin(url, href)
 
-            if 'contact' in link_text or 'form' in link_text or 'contact' in href.lower() or 'form' in href.lower():
+            if '/contact' in href.lower() or 'contact' in href.lower() or '特定商取引法' in link.get_text():
                 contact_links.add(full_url)
         
         return list(contact_links)
     except Exception as e:
         print(f"Failed to retrieve contact form links from {url}: {e}")
+        return []
+
+# 「特定商品法に基づく表記」を探す関数
+def find_tokushoho_links(url):
+    try:
+        response = requests.get(url, verify=False)
+        response.encoding = response.apparent_encoding
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        tokushoho_links = set()
+        links = soup.find_all('a', href=True)
+        for link in links:
+            href = link['href']
+            full_url = urljoin(url, href)
+
+            if '特定商取引法' in link.get_text():
+                tokushoho_links.add(full_url)
+        
+        return list(tokushoho_links)
+    except Exception as e:
+        print(f"Failed to retrieve 特定商取引法 links from {url}: {e}")
         return []
 
 # スプレッドシートに結果を返す
@@ -99,58 +112,15 @@ for i, main_url in enumerate(url_list, start=2):
     emails = find_email_addresses(main_url)
     contact_forms = find_contact_form_links(main_url)
 
-    phone_output = ', '.join(phone_numbers) if phone_numbers else 'ー'
-    email_output = emails[0] if emails else 'ー'
-    
-    # メールアドレスが見つかった場合はコンタクトフォームリンクは無視する
-    if emails:
-        contact_form_output = 'ー'
-    else:
-        contact_form_output = contact_forms[0] if contact_forms else 'ー'
+    # 特定商取引法ページがあるかを確認
+    tokushoho_links = find_tokushoho_links(main_url)
+    if tokushoho_links:
+        tokushoho_url = tokushoho_links[0]
+        # 特定商取引法ページで電話番号やメールアドレスを探す
+        phone_numbers += find_phone_numbers(tokushoho_url)
+        emails += find_email_addresses(tokushoho_url)
 
-    # メインのURLをD列に設定
-    sheet.update_cell(i, 4, main_url)  # D列にメインのURLを挿入
-    sheet.update_cell(i, 5, phone_output)  # E列に電話番号を挿入
-    sheet.update_cell(i, 6, email_output)  # F列にメールアドレスを挿入（またはコンタクトフォームリンク）
-    sheet.update_cell(i, 7, contact_form_output)  # G列にコンタクトフォームリンクを挿入
-
-    # メインページのリンクを取得してさらに探索
-    try:
-        response = requests.get(main_url, verify=False)
-        response.encoding = response.apparent_encoding
-        soup = BeautifulSoup(response.text, 'html.parser')
-        links = soup.find_all('a', href=True)
-
-        # メインページのリンクの探索
-        found_phone = False
-        found_email_or_form = False
-
-        for link in links:
-            href = link['href']
-            full_url = urljoin(main_url, href)
-
-            if not found_phone:
-                phone_numbers = find_phone_numbers(full_url)
-                if phone_numbers:
-                    print(f"Found phone numbers at {full_url}: {phone_numbers}")
-                    sheet.update_cell(i, 5, ', '.join(phone_numbers))
-                    found_phone = True
-
-            if not found_email_or_form:
-                emails = find_email_addresses(full_url)
-                contact_forms = find_contact_form_links(full_url)
-                if emails:
-                    print(f"Found email addresses at {full_url}: {emails}")
-                    sheet.update_cell(i, 6, emails[0])
-                    contact_forms = []  # メールアドレスが見つかればコンタクトフォームリンクは無視
-                    found_email_or_form = True
-                elif contact_forms:
-                    print(f"Found contact forms at {full_url}: {contact_forms}")
-                    sheet.update_cell(i, 7, contact_forms[0])
-                    found_email_or_form = True
-
-            # どちらも見つかった場合は次のURLへ
-            if found_phone and found_email_or_form:
-                break
-    except Exception as e:
-        print(f"Failed to process links from {main_url}: {e}")
+    # ABC列にそれぞれURL、電話番号、メールアドレスまたはコンタクトフォームリンクを出力
+    new_sheet.update_cell(i, 1, main_url)  # A列にメインのURLを挿入
+    new_sheet.update_cell(i, 2, ', '.join(set(phone_numbers)) if phone_numbers else 'ー')  # B列に電話番号を挿入
+    new_sheet.update_cell(i, 3, emails[0] if emails else (contact_forms[0] if contact_forms else 'ー'))  # C列にメールアドレスまたはコンタクトフォームリンクを挿入
