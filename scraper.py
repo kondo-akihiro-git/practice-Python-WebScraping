@@ -46,7 +46,7 @@ def find_phone_numbers(url):
         for phone in phones:
             if "fax" not in phone.lower():  # FAXではない電話番号をフィルタリング
                 digits = re.sub(r'\D', '', phone)
-                if len(digits) >= 10 and '.' not in phone:  # 電話番号の最小桁数を設定し、ピリオドを含むものは除外
+                if len(digits) >= 10 and '.' not in phone and not re.search(r'\d{5,}', phone):  # 電話番号の最小桁数を設定し、ピリオドや5桁以上の連続する数字を除外
                     filtered_phones.append(phone)
 
         return filtered_phones
@@ -76,11 +76,13 @@ def find_email_addresses(url):
         # メールアドレスを含むすべてのテキストを取得
         page_text, script_text = get_page_text(url)
         
-        # HTML内とJavaScript内のメールアドレスを抽出する正規表現
-        email_pattern = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', re.UNICODE)
+        # メールアドレスを検出する正規表現 (＠の全角・半角、[at]なども考慮)
+        email_pattern = re.compile(r'[a-zA-Z0-9_.+-]+[@＠][a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+|[a-zA-Z0-9_.+-]+[＠][a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*', re.UNICODE)
         emails = set(email_pattern.findall(page_text + ' ' + script_text))
 
-        # @ が含まれている全てのメールアドレスを抽出
+        # [at] を @ として扱う
+        emails = {email.replace('[at]', '@') for email in emails}
+
         return list(emails)
     except Exception as e:
         print(f"Failed to retrieve email addresses from {url}: {e}")
@@ -121,6 +123,15 @@ for i, main_url in enumerate(url_list, start=2):
         contact_form_output = 'ー'
     else:
         contact_form_output = contact_forms[0] if contact_forms else 'ー'
+
+        # コンタクトフォームが見つからない場合に /contact を付加して解析
+        contact_url = urljoin(main_url, '/contact')
+        try:
+            response = requests.get(contact_url, verify=False)
+            if response.status_code == 200:
+                contact_form_output = contact_url
+        except Exception as e:
+            print(f"Failed to retrieve contact form from {contact_url}: {e}")
 
     # 新しいシートにデータを挿入
     new_sheet.update_cell(i, 1, main_url)  # A列にメインのURLを挿入
