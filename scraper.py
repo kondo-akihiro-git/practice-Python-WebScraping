@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 import warnings
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
-# SSL証明書の警告を抑制
+# SSL証明書の検証を無効にしないために警告を抑制
 warnings.filterwarnings("ignore", category=InsecureRequestWarning)
 
 # Google Sheets API認証情報の設定
@@ -23,108 +23,124 @@ new_sheet = spreadsheet.add_worksheet(title="Extracted Data", rows="100", cols="
 url_list = spreadsheet.sheet1.col_values(1)  # 1列目からURLを取得
 
 # 電話番号を探す関数
-def find_phone_numbers(text):
-    phone_pattern = re.compile(r'\(?\d{2,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,4}', re.UNICODE)
-    phones = set(phone_pattern.findall(text))
-
-    filtered_phones = []
-    for phone in phones:
-        if "fax" not in phone.lower():  # FAXではない電話番号をフィルタリング
-            # ピリオドを含む電話番号を除外
-            if '.' not in phone:
-                digits = re.sub(r'\D', '', phone)
-                if len(digits) >= 10:  # 電話番号の最小桁数を設定（例: 日本の電話番号は通常10桁以上）
-                    filtered_phones.append(phone)
-
-    return filtered_phones
-
-# メールアドレスを探す関数
-def find_email_addresses(text):
-    # 全角の「＠」を半角の「@」に変換
-    text = text.replace('＠', '@')
-    
-    email_pattern = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', re.UNICODE)
-    emails = set(email_pattern.findall(text))
-    return list(emails)
-
-# ページ内テキストとJavaScript内テキストを取得する関数
-def get_page_text(url):
+def find_phone_numbers(url):
     try:
         response = requests.get(url, verify=False)
         response.encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, 'html.parser')
-        scripts = soup.find_all('script')
-        script_text = " ".join(script.string for script in scripts if script.string)
 
-        return soup.get_text(), script_text, soup
+        def zenkaku_to_hankaku(text):
+            hankaku = text.translate(str.maketrans('０１２３４５６７８９ー－', '0123456789--'))
+            return hankaku
+
+        phone_pattern = re.compile(r'\(?\d{2,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,4}', re.UNICODE)
+        text = zenkaku_to_hankaku(soup.get_text())
+        phones = set(phone_pattern.findall(text))
+
+        filtered_phones = []
+        for phone in phones:
+            if "fax" not in phone.lower():  # FAXではない電話番号をフィルタリング
+                digits = re.sub(r'\D', '', phone)
+                if len(digits) >= 10:  # 電話番号の最小桁数を設定（例: 日本の電話番号は通常10桁以上）
+                    filtered_phones.append(phone)
+
+        return filtered_phones
     except Exception as e:
-        print(f"Failed to retrieve text from {url}: {e}")
-        return "", "", None
+        print(f"Failed to retrieve phone numbers from {url}: {e}")
+        return []
+
+# メールアドレスを探す関数
+def find_email_addresses(url):
+    try:
+        response = requests.get(url, verify=False)
+        response.encoding = response.apparent_encoding
+        soup = BeautifulSoup(response.text, 'html.parser')
+
+        email_pattern = re.compile(r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+', re.UNICODE)
+        emails = set(email_pattern.findall(soup.get_text()))
+
+        return list(emails)
+    except Exception as e:
+        print(f"Failed to retrieve email addresses from {url}: {e}")
+        return []
 
 # コンタクトフォームのリンクを探す関数
-def find_contact_form_links(url, soup):
-    contact_links = set()
-    links = soup.find_all('a', href=True)
-    for link in links:
-        href = link['href']
-        full_url = urljoin(url, href) if not href.startswith('http') else href
+def find_contact_form_links(url):
+    try:
+        response = requests.get(url, verify=False)
+        response.encoding = response.apparent_encoding
+        soup = BeautifulSoup(response.text, 'html.parser')
 
-        if any(keyword in href.lower() for keyword in ['/contact', '/問い合わせ', 'contact', '問い合わせ']):
-            contact_links.add(full_url)
-
-    # メインURLに「問い合わせ」などの文言が含まれている場合かつフォームが存在する場合にURLを追加
-    if any(keyword in soup.get_text().lower() for keyword in ['問い合わせ', 'contact']):
-        forms = soup.find_all('form')
-        if forms:
-            contact_links.add(url)
-    
-    # 入力要素（input）をチェック
-    inputs = soup.find_all('input')
-    if any(input.get('type') in ['text', 'email', 'tel'] for input in inputs):
-        contact_links.add(url)
-
-    return list(contact_links)
-
-# 全てのページをクロールする関数
-def crawl_all_pages(url, visited_urls):
-    to_visit = [url]
-    all_links = set()
-    
-    while to_visit:
-        current_url = to_visit.pop()
-        if current_url in visited_urls:
-            continue
-        
-        visited_urls.add(current_url)
-        
-        page_text, script_text, soup = get_page_text(current_url)
-        
-        # リンクを抽出して追加
+        contact_links = set()
         links = soup.find_all('a', href=True)
         for link in links:
             href = link['href']
-            full_url = urljoin(url, href) if not href.startswith('http') else href
-            if full_url not in visited_urls:
-                to_visit.append(full_url)
-                all_links.add(full_url)
-        
-        # 電話番号やメールアドレスの抽出
-        phone_numbers = find_phone_numbers(page_text) + find_phone_numbers(script_text)
-        emails = find_email_addresses(page_text) + find_email_addresses(script_text)
-        contact_forms = find_contact_form_links(current_url, soup)
-        
-        # スプレッドシートに書き込み
-        new_sheet.append_row([current_url, ', '.join(set(phone_numbers)) if phone_numbers else 'ー', emails[0] if emails else (contact_forms[0] if contact_forms else 'ー')])
+            full_url = urljoin(url, href)
 
-        # 取得した情報をプリント出力
-        print(f"URL: {current_url}")
-        print(f"Phone Numbers: {', '.join(set(phone_numbers)) if phone_numbers else 'ー'}")
-        print(f"Emails/Contact Forms: {emails[0] if emails else (contact_forms[0] if contact_forms else 'ー')}")
-        print("-" * 40)
-    
-    return all_links
+            if '/contact' in href.lower() or 'contact' in href.lower():
+                contact_links.add(full_url)
+        
+        return list(contact_links)
+    except Exception as e:
+        print(f"Failed to retrieve contact form links from {url}: {e}")
+        return []
 
 # スプレッドシートに結果を返す
-visited_urls = set()
-for main_url in url_list:
-    crawl_all_pages(main_url, visited_urls)
+for i, main_url in enumerate(url_list, start=2):
+    phone_numbers = find_phone_numbers(main_url)
+    emails = find_email_addresses(main_url)
+    contact_forms = find_contact_form_links(main_url)
+
+    phone_output = ', '.join(phone_numbers) if phone_numbers else 'ー'
+    email_output = emails[0] if emails else 'ー'
+    
+    # メールアドレスが見つかった場合はコンタクトフォームリンクは無視する
+    if emails:
+        contact_form_output = 'ー'
+    else:
+        contact_form_output = contact_forms[0] if contact_forms else 'ー'
+
+    # 新しいシートにデータを挿入
+    new_sheet.update_cell(i, 4, main_url)  # D列にメインのURLを挿入
+    new_sheet.update_cell(i, 5, phone_output)  # E列に電話番号を挿入
+    new_sheet.update_cell(i, 6, email_output)  # F列にメールアドレスまたはコンタクトフォームリンクを挿入
+
+    # メインページのリンクを取得してさらに探索
+    try:
+        response = requests.get(main_url, verify=False)
+        response.encoding = response.apparent_encoding
+        soup = BeautifulSoup(response.text, 'html.parser')
+        links = soup.find_all('a', href=True)
+
+        found_phone = False
+        found_email_or_form = False
+
+        for link in links:
+            href = link['href']
+            full_url = urljoin(main_url, href)
+
+            if not found_phone:
+                phone_numbers = find_phone_numbers(full_url)
+                if phone_numbers:
+                    print(f"Found phone numbers at {full_url}: {phone_numbers}")
+                    new_sheet.update_cell(i, 5, ', '.join(phone_numbers))
+                    found_phone = True
+
+            if not found_email_or_form:
+                emails = find_email_addresses(full_url)
+                contact_forms = find_contact_form_links(full_url)
+                if emails:
+                    print(f"Found email addresses at {full_url}: {emails}")
+                    new_sheet.update_cell(i, 6, emails[0])
+                    contact_forms = []  # メールアドレスが見つかればコンタクトフォームリンクは無視
+                    found_email_or_form = True
+                elif contact_forms:
+                    print(f"Found contact forms at {full_url}: {contact_forms}")
+                    new_sheet.update_cell(i, 7, contact_forms[0])
+                    found_email_or_form = True
+
+            # どちらも見つかった場合は次のURLへ
+            if found_phone and found_email_or_form:
+                break
+    except Exception as e:
+        print(f"Failed to process links from {main_url}: {e}")
